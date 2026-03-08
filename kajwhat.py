@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
+import pandas as pd
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -262,6 +264,172 @@ def main() -> int:
     create_html_from_csv(CSV_PATH, args.keyword)
     logging.info("Program finished")
     return 0
+
+
+def apple_timestamp_to_datetime(value: float | int | None) -> datetime | None:
+    """Convert Apple Core Data timestamp (seconds since 2001-01-01) to datetime."""
+    if value is None or pd.isna(value):
+        return None
+    unix_epoch = datetime.fromtimestamp(0)
+    apple_epoch = datetime(2001, 1, 1)
+    return datetime.fromtimestamp(float(value)) + (apple_epoch - unix_epoch)
+
+
+def read_chat_sessions(con: sqlite3.Connection) -> pd.DataFrame:
+    query = """
+        SELECT
+            Z_PK AS chat_id,
+            ZPARTNERNAME AS chatpartner,
+            ZCONTACTJID AS contact_jid
+        FROM ZWACHATSESSION
+    """
+    return pd.read_sql_query(query, con)
+
+
+def read_group_members(con: sqlite3.Connection) -> pd.DataFrame:
+    query = """
+        SELECT
+            Z_PK AS group_member_id,
+            ZCHATSESSION AS chat_id,
+            ZMEMBERJID AS member_jid,
+            ZCONTACTNAME AS contact_name,
+            ZFIRSTNAME AS first_name
+        FROM ZWAGROUPMEMBER
+    """
+    return pd.read_sql_query(query, con)
+
+
+def read_media_items(con: sqlite3.Connection) -> pd.DataFrame:
+    query = """
+        SELECT
+            Z_PK AS media_item_id,
+            ZMEDIALOCALPATH AS media_path,
+            ZLATITUDE AS latitude,
+            ZLONGITUDE AS longitude
+        FROM ZWAMEDIAITEM
+    """
+    return pd.read_sql_query(query, con)
+
+
+def read_messages(con: sqlite3.Connection) -> pd.DataFrame:
+    query = """
+        SELECT
+            Z_PK AS message_id,
+            ZCHATSESSION AS chat_id,
+            ZMESSAGEDATE AS timestamp,
+            ZFROMJID AS from_jid,
+            ZTOJID AS to_jid,
+            ZTEXT AS text,
+            ZISFROMME AS is_from_me,
+            ZPARENTMESSAGE AS reply_to,
+            ZGROUPMEMBER AS group_member_id,
+            ZMESSAGEINFO AS message_info_id,
+            ZMEDIAITEM AS media_item_id,
+            ZMESSAGETYPE AS message_type,
+            ZGROUPEVENTTYPE AS group_event_type,
+            ZPUSHNAME AS push_name
+        FROM ZWAMESSAGE
+    """
+    return pd.read_sql_query(query, con)
+
+
+def best_sender_name(row: pd.Series) -> str | None:
+    """Choose the best sender name available for a row."""
+    if row["is_from_me"]:
+        return "Kaj"
+
+    for key in ("first_name", "contact_name", "push_name", "chatpartner"):
+        value = row.get(key)
+        if pd.notna(value) and str(value).strip():
+            return str(value).strip()
+
+    return None
+
+
+def best_recipient_name(row: pd.Series) -> str | None:
+    """Choose the best recipient name available for a row."""
+    if row["is_from_me"]:
+        value = row.get("chatpartner")
+        if pd.notna(value) and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
+    con = sqlite3.connect(sqlite_path)
+    try:
+        chat_df = read_chat_sessions(con)
+        member_df = read_group_members(con)
+        media_df = read_media_items(con)
+        msg_df = read_messages(con)
+    finally:
+        con.close()
+
+    # Enrich messages with chat names
+    df = msg_df.merge(chat_df, on="chat_id", how="left")
+
+    # Enrich messages with group member data
+    df = df.merge(
+        member_df,
+        on=["chat_id", "group_member_id"],
+        how="left",
+    )
+
+    # Enrich messages with media data
+    df = df.merge(media_df, on="media_item_id", how="left")
+
+    # Derived datetime fields
+    df["date_dt"] = df["timestamp"].apply(apple_timestamp_to_datetime)
+    df["date"] = df["date_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    df["year"] = df["date_dt"].dt.year
+    df["yyyymm"] = df["date_dt"].dt.strftime("%Y-%m")
+    df["dmydate"] = df["date_dt"].dt.strftime("%d.%m.%Y")
+    df["hhmm"] = df["date_dt"].dt.strftime("%H:%M:%S")
+
+    # Names
+    df["from_name"] = df.apply(best_sender_name, axis=1)
+    df["to_name"] = df.apply(best_recipient_name, axis=1)
+
+    # Placeholder for future reaction support
+    df["reactions"] = ""
+
+    # Final column order
+    columns = [
+        "message_id",
+        "chat_id",
+        "chatpartner",
+        "timestamp",
+        "date",
+        "year",
+        "yyyymm",
+        "dmydate",
+        "hhmm",
+        "from_jid",
+        "to_jid",
+        "from_name",
+        "to_name",
+        "is_from_me",
+        "text",
+        "reply_to",
+        "group_member_id",
+        "message_info_id",
+        "reactions",
+        "media_item_id",
+        "media_path",
+        "latitude",
+        "longitude",
+        "message_type",
+        "group_event_type",
+        "push_name",
+    ]
+
+    df = df[columns].sort_values(["chatpartner", "timestamp", "message_id"])
+    return df
+
+
+def create_whatsapp_csv(sqlite_path: Path, csv_path: Path) -> None:
+    df = build_whatsapp_dataframe(sqlite_path)
+    df.to_csv(csv_path, sep=";", index=False)
 
 
 if __name__ == "__main__":

@@ -10,16 +10,28 @@ In my case, this was a painful operation involving research of how to make macOS
 * I needed to open `System Preferences / Integrity and security` and give `Terminal` so called `Full Disk Access`
 * In my case the backup is over 300 GB and I hence placed the backup on an external hard disk using a  **`ln -s`** symlink from `~/Library/Application Support/MobileSync/Backup` to my external HD `/Volumes/LaCie` where I put the iOS backup in the directory `MobileSync/Backup`
 * The first backup took 27 h to create 
-### Update **the location** of that backup in the configuration parameters
-```python
-  LACIE_PATH = Path("/Volumes/LaCie")
-  IOS_BACKUP_ROOT = LACIE_PATH / "MobileSync" / "Backup"
+### Configure **the location** of that backup and your own name
+Change the file `config.json`
+```json
+{
+  "my_name": "Kaj",
+  "external_volume": "LaCie",
+  "ios_backup_subdir": "MobileSync/Backup"
+}
 ```
-which so far are part of the code in `kajwhat.py` (they might be promoted to a config file later)
-
 ## Pipeline:
 iOS backup → ChatStorage.sqlite → WhatsApp.csv → HTML
 
 ## Data format
 
 The intermediate CSV format is documented in [whatsapp_csv_schema.md](whatsapp_csv_schema.md).
+
+## Dependencies
+
+`kajwhat.py` requires Python 3 and `pandas`.
+
+With Homebrew Python on macOS, installation may require:
+
+```bash
+python3 -m pip install --break-system-packages pandas
+```

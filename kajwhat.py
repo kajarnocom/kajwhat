@@ -271,11 +271,10 @@ def print_verbose_status(previous_start: Optional[datetime], status: Environment
 
 
 
-def should_skip_verbose(previous_start: Optional[datetime], status: EnvironmentStatus, started_at: datetime) -> bool:
+def should_show_verbose_preamble(previous_start: Optional[datetime], status: EnvironmentStatus, started_at: datetime) -> bool:
     if not (previous_start and status.csv.exists):
-        return False
-    return previous_start.date() == started_at.date()
-
+        return True
+    return previous_start.date() != started_at.date()
 
 
 def _section_sqlite_csv_pipeline():
@@ -307,6 +306,8 @@ def read_chat_sessions(con: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(query, con)
 
 
+
+
 def read_group_members(con: sqlite3.Connection) -> pd.DataFrame:
     query = """
         SELECT
@@ -318,6 +319,7 @@ def read_group_members(con: sqlite3.Connection) -> pd.DataFrame:
         FROM ZWAGROUPMEMBER
     """
     return pd.read_sql_query(query, con)
+
 
 
 def read_media_items(con: sqlite3.Connection) -> pd.DataFrame:
@@ -355,23 +357,30 @@ def read_messages(con: sqlite3.Connection) -> pd.DataFrame:
 
 
 
+def normalize_jid(value) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+
 def build_jid_name_map(chat_df: pd.DataFrame, member_df: pd.DataFrame) -> dict[str, str]:
     mapping: dict[str, str] = {}
 
     for _, row in chat_df.iterrows():
-        jid = row.get("contact_jid")
+        jid = normalize_jid(row.get("contact_jid"))
         name = row.get("chatpartner")
-        if pd.notna(jid) and pd.notna(name) and str(name).strip():
-            mapping[str(jid)] = str(name).strip()
+        if jid and pd.notna(name) and str(name).strip():
+            mapping[jid] = str(name).strip()
 
     for _, row in member_df.iterrows():
-        jid = row.get("member_jid")
+        jid = normalize_jid(row.get("member_jid"))
         name = row.get("contact_name")
         if pd.isna(name) or not str(name).strip():
             name = row.get("first_name")
-        if pd.notna(jid) and pd.notna(name) and str(name).strip():
-            mapping[str(jid)] = str(name).strip()
-
+        if jid and pd.notna(name) and str(name).strip():
+            mapping[jid] = str(name).strip()
     return mapping
 
 
@@ -380,7 +389,14 @@ def best_sender_name(row: pd.Series) -> str | None:
     if row["is_from_me"]:
         return MY_NAME
 
-    for key in ("jid_name", "first_name", "contact_name", "push_name", "chatpartner"):
+    for key in (
+        "group_member_jid_name",
+        "jid_name",
+        "first_name",
+        "contact_name",
+        "push_name",
+        "chatpartner",
+    ):
         value = row.get(key)
         if pd.notna(value) and str(value).strip():
             return str(value).strip()
@@ -405,7 +421,6 @@ def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
         member_df = read_group_members(con)
         media_df = read_media_items(con)
         msg_df = read_messages(con)
-        jid_name_map = build_jid_name_map(chat_df, member_df)
     finally:
         con.close()
 
@@ -430,10 +445,17 @@ def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
     df["dmydate"] = df["date_dt"].dt.strftime("%d.%m.%Y")
     df["hhmm"] = df["date_dt"].dt.strftime("%H:%M:%S")
 
+    jid_name_map = build_jid_name_map(chat_df, member_df)
+
+    df["from_jid_norm"] = df["from_jid"].map(normalize_jid)
+    df["member_jid_norm"] = df["member_jid"].map(normalize_jid)
+
+    df["jid_name"] = df["from_jid_norm"].map(jid_name_map)
+    df["group_member_jid_name"] = df["member_jid_norm"].map(jid_name_map)
+
     # Names
     df["from_name"] = df.apply(best_sender_name, axis=1)
     df["to_name"] = df.apply(best_recipient_name, axis=1)
-    df["jid_name"] = df["from_jid"].map(jid_name_map)
 
     df["weekday_sv"] = df["date_dt"].dt.weekday.map(lambda x: WEEKDAYS_SV[x])
     df["dmydate_with_weekday"] = df["weekday_sv"] + " " + df["dmydate"]
@@ -535,8 +557,8 @@ def write_chat_html(chat_df: pd.DataFrame, out_dir: Path) -> None:
         lines.append(f"<h2>{year}</h2>\n")
         for yyyymm, month_df in year_df.groupby("yyyymm", sort=True):
             lines.append(f"<h3>{yyyymm}</h3>\n")
-            for dmydate, day_df in month_df.groupby("dmydate", sort=True):
-                lines.append(f"<h4>{dmydate}</h4>\n")
+            for dmydate_with_weekday, day_df in month_df.groupby("dmydate_with_weekday", sort=True):
+                lines.append(f"<h4>{dmydate_with_weekday}</h4>\n")
                 for _, row in day_df.iterrows():
                     lines.append(html_message_line(row))
 
@@ -572,7 +594,7 @@ def create_html_from_csv(csv_path: Path, keyword: Optional[str]) -> tuple[int, i
             created += 1
 
     return created, overwritten
-    
+
 
 
 def _section_program_flow():
@@ -625,8 +647,12 @@ def main() -> int:
         status.ios_backup.exists,
     )
 
-    if not should_skip_verbose(previous_start, status, started_at):
+    if should_show_verbose_preamble(previous_start, status, started_at):
         print_verbose_status(previous_start, status, started_at)
+
+    # TODO: During development it may be useful to reuse an existing CSV
+    # instead of always archiving and rebuilding it. For normal production
+    # use, rebuilding CSV from SQLite is the intended default.
 
     archive_existing_csv(CSV_PATH, BASE_DIR / "arkiv")
 

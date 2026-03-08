@@ -261,6 +261,7 @@ def main() -> int:
         return 0
 
     print_verbose_status(previous_start, status, started_at)
+    create_whatsapp_csv(SQLITE_PATH, CSV_PATH) 
     create_html_from_csv(CSV_PATH, args.keyword)
     logging.info("Program finished")
     return 0

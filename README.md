@@ -19,3 +19,8 @@ which so far are part of the code in `kajwhat.py` (they might be promoted to a c
 
 ## Pipeline:
 iOS backup → ChatStorage.sqlite → WhatsApp.csv → HTML
+
+## Data format
+
+The intermediate CSV format is documented in  
+[whatsapp_csv_schema.md](whatsapp_csv_schema.md).

@@ -22,6 +22,7 @@ import sqlite3
 import pandas as pd
 import time
 import json
+import html
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -123,6 +124,13 @@ def format_timedelta_since(then: datetime, now: datetime) -> str:
 
 
 
+def format_index_date(date_str: str) -> str:
+    dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+    weekday = WEEKDAYS_SV[dt.weekday()]
+    return f"{weekday} {dt.day}.{dt.month}.{dt.year}"
+
+
+
 def apple_timestamp_to_datetime(value: float | int | None) -> datetime | None:
     """Convert Apple Core Data timestamp (seconds since 2001-01-01) to datetime."""
     if value is None or pd.isna(value):
@@ -219,7 +227,6 @@ def setup_logging(started_at: datetime) -> None:
 
 
 def print_verbose_status(previous_start: Optional[datetime], status: EnvironmentStatus, started_at: datetime) -> None:
-
     print(f"Programmet kajwhat.py startade {format_sv_datetime(started_at)}")
     if previous_start:
         print(
@@ -304,7 +311,6 @@ def read_chat_sessions(con: sqlite3.Connection) -> pd.DataFrame:
         FROM ZWACHATSESSION
     """
     return pd.read_sql_query(query, con)
-
 
 
 
@@ -439,11 +445,11 @@ def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
 
     # Derived datetime fields
     df["date_dt"] = df["timestamp"].apply(apple_timestamp_to_datetime)
-    df["date"] = df["date_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    df["date"] = df["date_dt"].dt.strftime("%Y-%m-%d %H:%M")
     df["year"] = df["date_dt"].dt.year
     df["yyyymm"] = df["date_dt"].dt.strftime("%Y-%m")
     df["dmydate"] = df["date_dt"].dt.strftime("%d.%m.%Y")
-    df["hhmm"] = df["date_dt"].dt.strftime("%H:%M:%S")
+    df["hhmm"] = df["date_dt"].dt.strftime("%H:%M")
 
     jid_name_map = build_jid_name_map(chat_df, member_df)
 
@@ -520,23 +526,82 @@ def make_filename(name: str) -> str:
 
 
 
-def html_message_line(row: pd.Series) -> str:
-    text = row["text"] if pd.notna(row["text"]) else ""
-    anchor = f"msg_{row['message_id']}"
+def render_message_text(text: str) -> str:
+    if not text:
+        return ""
+    return html.escape(text)
+
+
+
+def html_message_line(row: pd.Series, reply_lookup: dict[int, dict]) -> str:
+    text = render_message_text(row["text"] if pd.notna(row["text"]) else "")
+    anchor = f"msg_{int(row['message_id'])}"
     hhmm = row["hhmm"]
 
     if row["is_from_me"]:
         sender = MY_NAME
-        align = "right"
+        msg_class = "msg msg-me"
     else:
         sender = row["from_name"] if pd.notna(row["from_name"]) else row["chatpartner"]
-        align = "left"
+        msg_class = "msg msg-other"
 
     reply_html = ""
     if pd.notna(row["reply_to"]):
-        reply_html = f" <a class='reply-link' href='#msg_{int(row['reply_to'])}'>↩</a>"
+        reply_id = int(row["reply_to"])
+        reply = reply_lookup.get(reply_id)
+        if reply:
+            reply_sender = reply["from_name"] if pd.notna(reply["from_name"]) else reply["chatpartner"]
+            reply_text = render_message_text(reply["text"] if pd.notna(reply["text"]) else "")
+            reply_html = (
+                f"<div class='reply-preview'>"
+                f"<a href='#msg_{reply_id}'>"
+                f"<span class='reply-sender'>{html.escape(str(reply_sender))}:</span> "
+                f"{reply_text}"
+                f"</a></div>"
+            )
+        else:
+            reply_html = (
+                f"<div class='reply-preview'>"
+                f"<a href='#msg_{reply_id}'>↩ tidigare meddelande</a>"
+                f"</div>"
+            )
 
-    return f"<p id='{anchor}' align='{align}'>{sender}: {text} [{hhmm}]{reply_html}</p>\n"
+    return (
+        f"<div class='{msg_class}' id='{anchor}'>\n"
+        f"  {reply_html}\n"
+        f"  <div class='msg-main'>\n"
+        f"    <span class='sender'>{html.escape(str(sender))}</span>: "
+        f"<span class='text'>{text}</span>\n"
+        f"    <span class='time'>{hhmm}</span>\n"
+        f"  </div>\n"
+        f"</div>\n"
+    )
+
+
+
+def build_chat_toc(chat_df: pd.DataFrame) -> list[str]:
+    lines = ["<div class='chat-toc'>\n", "<h2>Index</h2>\n"]
+
+    for year, year_df in chat_df.groupby("year", sort=True):
+        lines.append(f"<div><a href='#year_{year}'>{year}</a></div>\n")
+
+        for yyyymm, month_df in year_df.groupby("yyyymm", sort=True):
+            day_links = []
+            for dmydate, day_df in month_df.groupby("dmydate", sort=True):
+                day_num = day_df["dmydate"].iloc[0].split(".")[0].lstrip("0")
+                day_anchor = f"day_{dmydate}"
+                day_links.append(f"<a href='#{day_anchor}'>{day_num}</a>")
+
+            month_anchor = f"month_{yyyymm}"
+            lines.append(
+                f"<div class='chat-toc-month'>&bull; "
+                f"<a href='#{month_anchor}'>{yyyymm}</a>: "
+                f"{' '.join(day_links)}"
+                f"</div>\n"
+            )
+
+    lines.append("</div>\n")
+    return lines
 
 
 
@@ -552,18 +617,136 @@ def write_chat_html(chat_df: pd.DataFrame, out_dir: Path) -> None:
         f"<html><head><title>WhatsApp {chatpartner}</title>{style}</head><body>\n",
         f"<h1>{chatpartner}</h1>\n",
     ]
+    lines.extend(build_index_nav())
+    lines.extend(build_chat_toc(chat_df))
+    reply_lookup = (
+        chat_df.set_index("message_id")[["from_name", "chatpartner", "text"]]
+        .to_dict("index")
+    )
 
     for year, year_df in chat_df.groupby("year", sort=True):
-        lines.append(f"<h2>{year}</h2>\n")
+        year_anchor = f"year_{year}"
+        lines.append(f"<h2 id='{year_anchor}'>{year}</h2>\n")
         for yyyymm, month_df in year_df.groupby("yyyymm", sort=True):
-            lines.append(f"<h3>{yyyymm}</h3>\n")
+            month_anchor = f"month_{yyyymm}"
+            lines.append(f"<h3 id='{month_anchor}'>{yyyymm}</h3>\n")
             for dmydate_with_weekday, day_df in month_df.groupby("dmydate_with_weekday", sort=True):
-                lines.append(f"<h4>{dmydate_with_weekday}</h4>\n")
+                day_anchor = f"day_{day_df['dmydate'].iloc[0]}"
+                lines.append(f"<h4 id='{day_anchor}'>{dmydate_with_weekday}</h4>\n")
                 for _, row in day_df.iterrows():
-                    lines.append(html_message_line(row))
+                    lines.append(html_message_line(row, reply_lookup))
 
     lines.append("</body></html>\n")
     filename.write_text("".join(lines), encoding="utf-8")
+
+
+
+def filter_index_scope(df: pd.DataFrame, scope: str) -> pd.DataFrame:
+    today = datetime.now()
+
+    if scope == "all":
+        return df
+
+    if scope == "year":
+        return df[df["year"] == today.year]
+
+    if scope == "month":
+        current_yyyymm = today.strftime("%Y-%m")
+        return df[df["yyyymm"] == current_yyyymm]
+
+    raise ValueError(f"Unknown scope: {scope}")
+
+
+
+def build_index_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    grouped = (
+        df.groupby("chatpartner", dropna=False)
+        .agg(
+            message_count=("message_id", "count"),
+            latest_timestamp=("timestamp", "max"),
+            latest_date=("date", "max"),
+        )
+        .reset_index()
+    )
+
+    grouped["filename"] = grouped["chatpartner"].map(lambda x: f"{make_filename(str(x))}.html")
+    return grouped
+
+
+
+def sort_index_dataframe(index_df: pd.DataFrame, order: str) -> pd.DataFrame:
+    if order == "alpha":
+        return index_df.sort_values(["chatpartner"])
+    if order == "size":
+        return index_df.sort_values(["message_count", "chatpartner"], ascending=[False, True])
+    if order == "date":
+        return index_df.sort_values(["latest_timestamp", "chatpartner"], ascending=[False, True])
+    raise ValueError(f"Unknown order: {order}")
+
+
+
+def build_index_nav() -> list[str]:
+    lines = ["<div class='index-nav'>\n"]
+    for scope in ["month", "year", "all"]:
+        for order in ["alpha", "size", "date"]:
+            href = f"index_{scope}_{order}.html"
+            label = f"{scope}/{order}"
+            lines.append(f"<a href='{href}'>{label}</a> ")
+    lines.append("</div>\n")
+    return lines
+
+
+
+def write_index_html(index_df: pd.DataFrame, out_dir: Path, scope: str, order: str) -> None:
+    filename = out_dir / f"index_{scope}_{order}.html"
+    style = '<link rel="stylesheet" href="../whatsapp.css">'
+
+    def scope_label(scope: str) -> str:
+        now = datetime.now()
+        if scope == "all":
+            return "all"
+        if scope == "year":
+            return str(now.year)
+        if scope == "month":
+            return now.strftime("%Y-%m")
+        raise ValueError(f"Unknown scope: {scope}")    
+    title = f"WhatsApp {scope_label(scope)} / {order}"
+
+    lines = [
+        f"<html><head><title>{title}</title>{style}</head><body>\n",
+        f"<h1>{title}</h1>\n",
+    ]
+    lines.extend(build_index_nav())
+    lines.extend("<ol>\n")
+
+    for _, row in index_df.iterrows():
+        chatpartner = html.escape(str(row["chatpartner"]))
+        href = html.escape(str(row["filename"]))
+        count = int(row["message_count"])
+        latest = html.escape(format_index_date(str(row["latest_date"])))
+        lines.append(
+            f"<li><a href='{href}'>{chatpartner}</a> "
+            f"({count}) {latest}</li>\n"
+        )
+
+    lines.append("</ol>\n")
+    lines.append("</body></html>\n")
+    filename.write_text("".join(lines), encoding="utf-8")
+
+
+
+def create_index_pages_from_csv(csv_path: Path) -> None:
+    df = pd.read_csv(csv_path, sep=";")
+    out_dir = BASE_DIR / "html"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for scope in ["month", "year", "all"]:
+        scoped_df = filter_index_scope(df, scope)
+        index_df = build_index_dataframe(scoped_df)
+
+        for order in ["alpha", "size", "date"]:
+            sorted_index_df = sort_index_dataframe(index_df, order)
+            write_index_html(sorted_index_df, out_dir, scope, order)
 
 
 
@@ -654,14 +837,16 @@ def main() -> int:
     # instead of always archiving and rebuilding it. For normal production
     # use, rebuilding CSV from SQLite is the intended default.
 
-    archive_existing_csv(CSV_PATH, BASE_DIR / "arkiv")
-
-    with timed_step(
-        "CSV_GENERATION",
-        "Skapar WhatsApp.csv från ChatStorage.sqlite...",
-        "WhatsApp.csv skapad"
-    ):
-        create_whatsapp_csv(SQLITE_PATH, CSV_PATH)
+    if not CSV_PATH.exists():
+        with timed_step(
+            "CSV_GENERATION",
+            "Skapar WhatsApp.csv från ChatStorage.sqlite...",
+            "WhatsApp.csv skapad"
+        ):
+            create_whatsapp_csv(SQLITE_PATH, CSV_PATH)
+    else:
+        print("Återanvänder befintlig WhatsApp.csv.")
+        logging.info("CSV_REUSED path=%s", CSV_PATH)
 
     with timed_step(
         "HTML_GENERATION",
@@ -669,6 +854,13 @@ def main() -> int:
         "HTML-filer skapade"
     ):
         created, overwritten = create_html_from_csv(CSV_PATH, args.keyword)
+
+    with timed_step(
+        "INDEX_GENERATION",
+        "Skapar indexsidor...",
+        "Indexsidor skapade"
+    ):
+        create_index_pages_from_csv(CSV_PATH)
 
     print(f"HTML-filer: {created} skapade, {overwritten} överskrivna.")
     logging.info("HTML files created=%s overwritten=%s", created, overwritten)

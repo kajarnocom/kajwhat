@@ -15,7 +15,7 @@ In my case, this was a painful operation involving research of how to make macOS
   LACIE_PATH = Path("/Volumes/LaCie")
   IOS_BACKUP_ROOT = LACIE_PATH / "MobileSync" / "Backup"
 ```
-which so far are part of the code (they might be promoted to a config file later)
+which so far are part of the code in `kajwhat.py` (they might be promoted to a config file later)
 
 ## Pipeline:
 iOS backup → ChatStorage.sqlite → WhatsApp.csv → HTML

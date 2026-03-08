@@ -5,6 +5,9 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints/
 
+WhatsApp.ipynb
+arkiv/
+
 html/
 *.csv
 *.log

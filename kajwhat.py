@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+
+"""
+kajwhat.py structure
+
+1. Imports
+2. Configuration
+3. Dataclasses
+4. Helpers
+5. Environment status
+6. SQLite → CSV pipeline
+7. HTML generation
+8. Program flow
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -9,7 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
+from contextlib import contextmanager
+import time
 
 BASE_DIR = Path.home() / "Code" / "whatsapp"
 LOG_PATH = BASE_DIR / "kajwhat.log"
@@ -19,7 +34,6 @@ LACIE_PATH = Path("/Volumes/LaCie")
 IOS_BACKUP_ROOT = LACIE_PATH / "MobileSync" / "Backup"
 
 WEEKDAYS_SV = ["mån", "tis", "ons", "tor", "fre", "lör", "sön"]
-
 
 @dataclass
 class FileStatus:
@@ -47,6 +61,12 @@ class EnvironmentStatus:
     ios_backup: IOSBackupStatus
 
 
+
+def _section_formatting_and_conversion():
+    pass
+
+
+
 def format_mb(num_bytes: int) -> str:
     mb = round(num_bytes / (1024 * 1024))
     return f"{mb:,} MB".replace(",", ".")
@@ -71,6 +91,21 @@ def format_timedelta_since(then: datetime, now: datetime) -> str:
     if days >= 1:
         return f"för {days}d{hours}h sedan"
     return f"för {hours}h{minutes}min sedan"
+
+
+
+def apple_timestamp_to_datetime(value: float | int | None) -> datetime | None:
+    """Convert Apple Core Data timestamp (seconds since 2001-01-01) to datetime."""
+    if value is None or pd.isna(value):
+        return None
+    unix_epoch = datetime.fromtimestamp(0)
+    apple_epoch = datetime(2001, 1, 1)
+    return datetime.fromtimestamp(float(value)) + (apple_epoch - unix_epoch)
+
+
+
+def _section_environment_status():
+    pass
 
 
 
@@ -214,66 +249,22 @@ def should_skip_verbose(previous_start: Optional[datetime], status: EnvironmentS
 
 
 
-def create_html_from_csv(csv_path: Path, keyword: Optional[str]) -> None:
-    logging.info("HTML_GENERATION_START csv=%s keyword=%s", csv_path, keyword)
-    if keyword:
-        print(f"Nästa steg: skapa HTML-filer utgående från {csv_path.name} med sökord '{keyword}'.")
-    else:
-        print(f"Nästa steg: skapa HTML-filer utgående från {csv_path.name}.")
-    logging.info("HTML_GENERATION_END")
+def _section_sqlite_csv_pipeline():
+    pass
 
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="kajwhat.py – skördar och analyserar WhatsApp-data"
-    )
-    parser.add_argument(
-        "keyword",
-        nargs="?",
-        help="valfritt sökord, t.ex. 'Älveskär' eller 'Felix'",
-    )
-    return parser.parse_args()
+def archive_existing_csv(csv_path: Path, archive_dir: Path) -> None:
+    if not csv_path.exists():
+        return
 
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.fromtimestamp(csv_path.stat().st_mtime).strftime("%Y-%m-%d-%H-%M")
+    archived = archive_dir / f"WhatsApp_{stamp}.csv"
+    csv_path.rename(archived)
+    logging.info("CSV_ARCHIVED from=%s to=%s", csv_path, archived)
+    print(f"Arkiverade tidigare CSV till {archived.name}.")
 
-
-def main() -> int:
-    args = parse_args()
-    started_at = datetime.now()
-    previous_start = latest_logged_start(LOG_PATH)
-    status = collect_environment_status()
-    setup_logging(started_at)
-    logging.info("Program started in %s", BASE_DIR)
-
-    logging.info(
-        "Status csv_exists=%s log_exists=%s sqlite_exists=%s lacie_exists=%s ios_backup_exists=%s",
-        status.csv.exists,
-        status.log.exists,
-        status.sqlite.exists,
-        status.lacie_exists,
-        status.ios_backup.exists,
-    )
-
-    if should_skip_verbose(previous_start, status, started_at) and status.csv.exists:
-        logging.info("Skipping verbose status; continuing directly to HTML generation")
-        create_html_from_csv(CSV_PATH, args.keyword)
-        logging.info("Program finished")
-        return 0
-
-    print_verbose_status(previous_start, status, started_at)
-    create_whatsapp_csv(SQLITE_PATH, CSV_PATH) 
-    create_html_from_csv(CSV_PATH, args.keyword)
-    logging.info("Program finished")
-    return 0
-
-
-def apple_timestamp_to_datetime(value: float | int | None) -> datetime | None:
-    """Convert Apple Core Data timestamp (seconds since 2001-01-01) to datetime."""
-    if value is None or pd.isna(value):
-        return None
-    unix_epoch = datetime.fromtimestamp(0)
-    apple_epoch = datetime(2001, 1, 1)
-    return datetime.fromtimestamp(float(value)) + (apple_epoch - unix_epoch)
 
 
 def read_chat_sessions(con: sqlite3.Connection) -> pd.DataFrame:
@@ -431,6 +422,164 @@ def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
 def create_whatsapp_csv(sqlite_path: Path, csv_path: Path) -> None:
     df = build_whatsapp_dataframe(sqlite_path)
     df.to_csv(csv_path, sep=";", index=False)
+
+
+
+def _section_html_generation():
+    pass
+
+
+
+def make_filename(name: str) -> str:
+    if not isinstance(name, str):
+        return "ej-str"
+    s = name.replace(" ", "_")
+    for pair in ["ÅA", "ÄA", "ÖO", "ÜU", "ßs", "åa", "äa", "öo", "üu", "/_"]:
+        s = s.replace(pair[0], pair[1])
+    return s
+
+
+
+def html_message_line(row: pd.Series) -> str:
+    text = row["text"] if pd.notna(row["text"]) else ""
+    anchor = f"msg_{row['message_id']}"
+    hhmm = row["hhmm"]
+
+    if row["is_from_me"]:
+        sender = "Kaj"
+        align = "right"
+    else:
+        sender = row["from_name"] if pd.notna(row["from_name"]) else row["chatpartner"]
+        align = "left"
+
+    reply_html = ""
+    if pd.notna(row["reply_to"]):
+        reply_html = f" <a class='reply-link' href='#msg_{int(row['reply_to'])}'>↩</a>"
+
+    return f"<p id='{anchor}' align='{align}'>{sender}: {text} [{hhmm}]{reply_html}</p>\n"
+
+
+
+def write_chat_html(chat_df: pd.DataFrame, out_dir: Path) -> None:
+    if chat_df.empty:
+        return
+
+    chatpartner = chat_df["chatpartner"].iloc[0]
+    filename = out_dir / f"{make_filename(chatpartner)}.html"
+    style = '<link rel="stylesheet" href="../whatsapp.css">'
+
+    lines = [
+        f"<html><head><title>WhatsApp {chatpartner}</title>{style}</head><body>\n",
+        f"<h1>{chatpartner}</h1>\n",
+    ]
+
+    for year, year_df in chat_df.groupby("year", sort=True):
+        lines.append(f"<h2>{year}</h2>\n")
+        for yyyymm, month_df in year_df.groupby("yyyymm", sort=True):
+            lines.append(f"<h3>{yyyymm}</h3>\n")
+            for dmydate, day_df in month_df.groupby("dmydate", sort=True):
+                lines.append(f"<h4>{dmydate}</h4>\n")
+                for _, row in day_df.iterrows():
+                    lines.append(html_message_line(row))
+
+    lines.append("</body></html>\n")
+    filename.write_text("".join(lines), encoding="utf-8")
+
+
+
+def create_html_from_csv(csv_path: Path, keyword: Optional[str]) -> None:
+    df = pd.read_csv(csv_path, sep=";")
+    out_dir = BASE_DIR / "html"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if keyword:
+        mask = (
+            df["text"].fillna("").str.contains(keyword, case=False, na=False) |
+            df["chatpartner"].fillna("").str.contains(keyword, case=False, na=False)
+        )
+        df = df[mask]
+
+    df = df.sort_values(["chatpartner", "timestamp", "message_id"])
+
+    for _, chat_df in df.groupby("chatpartner", sort=True):
+        write_chat_html(chat_df, out_dir)
+        
+
+
+def _section_program_flow():
+    pass
+
+
+
+@contextmanager
+def timed_step(label: str, screen_text: str | None = None):
+    if screen_text:
+        print(screen_text)
+    logging.info("%s_START", label)
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - started
+        logging.info("%s_END seconds=%.3f", label, elapsed)
+        if screen_text:
+            print(f"{label} finished in {elapsed:.1f} seconds.")
+
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="kajwhat.py – skördar och analyserar WhatsApp-data"
+    )
+    parser.add_argument(
+        "keyword",
+        nargs="?",
+        help="valfritt sökord, t.ex. 'Älveskär' eller 'Felix'",
+    )
+    return parser.parse_args()
+
+
+
+def main() -> int:
+    args = parse_args()
+    started_at = datetime.now()
+    previous_start = latest_logged_start(LOG_PATH)
+    status = collect_environment_status()
+    setup_logging(started_at)
+    logging.info("Program started in %s", BASE_DIR)
+
+    logging.info(
+        "Status csv_exists=%s log_exists=%s sqlite_exists=%s lacie_exists=%s ios_backup_exists=%s",
+        status.csv.exists,
+        status.log.exists,
+        status.sqlite.exists,
+        status.lacie_exists,
+        status.ios_backup.exists,
+    )
+
+    if should_skip_verbose(previous_start, status, started_at) and status.csv.exists:
+        logging.info("Skipping verbose status; continuing directly to HTML generation")
+        create_html_from_csv(CSV_PATH, args.keyword)
+        logging.info("Program finished")
+        return 0
+
+    print_verbose_status(previous_start, status, started_at)
+
+    with timed_step(
+        "CSV_GENERATION",
+        "Skapar WhatsApp.csv från ChatStorage.sqlite..."
+    ):
+        create_whatsapp_csv(SQLITE_PATH, CSV_PATH)
+
+    with timed_step(
+        "HTML_GENERATION",
+        "Skapar HTML-filer från WhatsApp.csv..."
+    ):
+        create_html_from_csv(CSV_PATH, args.keyword)
+
+    logging.info("Program finished")
+    return 0
+
 
 
 if __name__ == "__main__":

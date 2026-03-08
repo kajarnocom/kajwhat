@@ -13,27 +13,55 @@ kajwhat.py structure
 8. Program flow
 """
 
+
 from __future__ import annotations
 
 import argparse
 import logging
 import sqlite3
 import pandas as pd
+import time
+import json
+
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
-import time
+
+
+
+def load_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Configuration file missing: {config_path}. "
+            "Create config.json with my_name, external_volume, and ios_backup_subdir."
+        )
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    required = ["my_name", "external_volume", "ios_backup_subdir"]
+    missing = [key for key in required if key not in config or not str(config[key]).strip()]
+    if missing:
+        raise ValueError(f"Missing required config keys in {config_path}: {', '.join(missing)}")
+
+    return config
+
+
 
 BASE_DIR = Path.home() / "Code" / "whatsapp"
 LOG_PATH = BASE_DIR / "kajwhat.log"
 CSV_PATH = BASE_DIR / "WhatsApp.csv"
 SQLITE_PATH = BASE_DIR / "ChatStorage.sqlite"
-LACIE_PATH = Path("/Volumes/LaCie")
-IOS_BACKUP_ROOT = LACIE_PATH / "MobileSync" / "Backup"
+
+CONFIG = load_config(BASE_DIR / "config.json")
+MY_NAME = CONFIG["my_name"]
+LACIE_PATH = Path("/Volumes") / CONFIG["external_volume"]
+IOS_BACKUP_ROOT = LACIE_PATH / CONFIG["ios_backup_subdir"]
 
 WEEKDAYS_SV = ["mån", "tis", "ons", "tor", "fre", "lör", "sön"]
+
+
 
 @dataclass
 class FileStatus:
@@ -41,6 +69,7 @@ class FileStatus:
     date: Optional[datetime] = None
     mb: Optional[str] = None
     path: Optional[Path] = None
+
 
 
 @dataclass
@@ -325,17 +354,39 @@ def read_messages(con: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(query, con)
 
 
-def best_sender_name(row: pd.Series) -> str | None:
-    """Choose the best sender name available for a row."""
-    if row["is_from_me"]:
-        return "Kaj"
 
-    for key in ("first_name", "contact_name", "push_name", "chatpartner"):
+def build_jid_name_map(chat_df: pd.DataFrame, member_df: pd.DataFrame) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+
+    for _, row in chat_df.iterrows():
+        jid = row.get("contact_jid")
+        name = row.get("chatpartner")
+        if pd.notna(jid) and pd.notna(name) and str(name).strip():
+            mapping[str(jid)] = str(name).strip()
+
+    for _, row in member_df.iterrows():
+        jid = row.get("member_jid")
+        name = row.get("contact_name")
+        if pd.isna(name) or not str(name).strip():
+            name = row.get("first_name")
+        if pd.notna(jid) and pd.notna(name) and str(name).strip():
+            mapping[str(jid)] = str(name).strip()
+
+    return mapping
+
+
+
+def best_sender_name(row: pd.Series) -> str | None:
+    if row["is_from_me"]:
+        return MY_NAME
+
+    for key in ("jid_name", "first_name", "contact_name", "push_name", "chatpartner"):
         value = row.get(key)
         if pd.notna(value) and str(value).strip():
             return str(value).strip()
 
     return None
+
 
 
 def best_recipient_name(row: pd.Series) -> str | None:
@@ -354,6 +405,7 @@ def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
         member_df = read_group_members(con)
         media_df = read_media_items(con)
         msg_df = read_messages(con)
+        jid_name_map = build_jid_name_map(chat_df, member_df)
     finally:
         con.close()
 
@@ -381,6 +433,10 @@ def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
     # Names
     df["from_name"] = df.apply(best_sender_name, axis=1)
     df["to_name"] = df.apply(best_recipient_name, axis=1)
+    df["jid_name"] = df["from_jid"].map(jid_name_map)
+
+    df["weekday_sv"] = df["date_dt"].dt.weekday.map(lambda x: WEEKDAYS_SV[x])
+    df["dmydate_with_weekday"] = df["weekday_sv"] + " " + df["dmydate"]
 
     # Placeholder for future reaction support
     df["reactions"] = ""
@@ -395,6 +451,8 @@ def build_whatsapp_dataframe(sqlite_path: Path) -> pd.DataFrame:
         "year",
         "yyyymm",
         "dmydate",
+        "weekday_sv",
+        "dmydate_with_weekday",
         "hhmm",
         "from_jid",
         "to_jid",
@@ -446,7 +504,7 @@ def html_message_line(row: pd.Series) -> str:
     hhmm = row["hhmm"]
 
     if row["is_from_me"]:
-        sender = "Kaj"
+        sender = MY_NAME
         align = "right"
     else:
         sender = row["from_name"] if pd.notna(row["from_name"]) else row["chatpartner"]
@@ -487,7 +545,7 @@ def write_chat_html(chat_df: pd.DataFrame, out_dir: Path) -> None:
 
 
 
-def create_html_from_csv(csv_path: Path, keyword: Optional[str]) -> None:
+def create_html_from_csv(csv_path: Path, keyword: Optional[str]) -> tuple[int, int]:
     df = pd.read_csv(csv_path, sep=";")
     out_dir = BASE_DIR / "html"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -501,9 +559,20 @@ def create_html_from_csv(csv_path: Path, keyword: Optional[str]) -> None:
 
     df = df.sort_values(["chatpartner", "timestamp", "message_id"])
 
+    created = 0
+    overwritten = 0
+
     for _, chat_df in df.groupby("chatpartner", sort=True):
+        target = out_dir / f"{make_filename(chat_df['chatpartner'].iloc[0])}.html"
+        existed = target.exists()
         write_chat_html(chat_df, out_dir)
-        
+        if existed:
+            overwritten += 1
+        else:
+            created += 1
+
+    return created, overwritten
+    
 
 
 def _section_program_flow():
@@ -512,9 +581,8 @@ def _section_program_flow():
 
 
 @contextmanager
-def timed_step(label: str, screen_text: str | None = None):
-    if screen_text:
-        print(screen_text)
+def timed_step(label: str, start_text: str, end_text: str | None = None):
+    print(start_text)
     logging.info("%s_START", label)
     started = time.perf_counter()
     try:
@@ -522,8 +590,8 @@ def timed_step(label: str, screen_text: str | None = None):
     finally:
         elapsed = time.perf_counter() - started
         logging.info("%s_END seconds=%.3f", label, elapsed)
-        if screen_text:
-            print(f"{label} finished in {elapsed:.1f} seconds.")
+        if end_text:
+            print(f"{end_text} ({elapsed:.1f} s)")
 
 
 
@@ -557,25 +625,27 @@ def main() -> int:
         status.ios_backup.exists,
     )
 
-    if should_skip_verbose(previous_start, status, started_at) and status.csv.exists:
-        logging.info("Skipping verbose status; continuing directly to HTML generation")
-        create_html_from_csv(CSV_PATH, args.keyword)
-        logging.info("Program finished")
-        return 0
+    if not should_skip_verbose(previous_start, status, started_at):
+        print_verbose_status(previous_start, status, started_at)
 
-    print_verbose_status(previous_start, status, started_at)
+    archive_existing_csv(CSV_PATH, BASE_DIR / "arkiv")
 
     with timed_step(
         "CSV_GENERATION",
-        "Skapar WhatsApp.csv från ChatStorage.sqlite..."
+        "Skapar WhatsApp.csv från ChatStorage.sqlite...",
+        "WhatsApp.csv skapad"
     ):
         create_whatsapp_csv(SQLITE_PATH, CSV_PATH)
 
     with timed_step(
         "HTML_GENERATION",
-        "Skapar HTML-filer från WhatsApp.csv..."
+        "Skapar HTML-filer från WhatsApp.csv...",
+        "HTML-filer skapade"
     ):
-        create_html_from_csv(CSV_PATH, args.keyword)
+        created, overwritten = create_html_from_csv(CSV_PATH, args.keyword)
+
+    print(f"HTML-filer: {created} skapade, {overwritten} överskrivna.")
+    logging.info("HTML files created=%s overwritten=%s", created, overwritten)
 
     logging.info("Program finished")
     return 0

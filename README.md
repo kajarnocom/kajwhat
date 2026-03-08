@@ -4,11 +4,11 @@ Extract WhatsApp messages from iOS backup SQLite database and generate readable 
 
 ## Prerequisites
 ### Take iOS backup of iPhone 
-In my case, this was a painful operation
+In my case, this was a painful operation involving research of how to make macOS behave like a computer:
 * The backup file usually lands in **`~/Library/Application Support/MobileSync/Backup`**
-* Terminal gave me **`Operation not permitted`** when merely wanting to list the file, even with `**sudo**` (thanks to the Spirit of Steve Jobs) 
+* Terminal gave me **`Operation not permitted`** when merely wanting to list the file, even with **`sudo`** (thanks to the Spirit of Steve Jobs 'protecting' myself from my own productivity) 
 * I needed to open `System Preferences / Integrity and security` and give `Terminal` so called `Full Disk Access`
-* In my case the backup is over 300 GB and I hence placed the backup on an external hard disk using a symlink from `~/Library/Application Support/MobileSync/Backup` to my external HD `/Volumes/LaCie` where I put the iOS backup in the directory `MobileSync/Backup`
+* In my case the backup is over 300 GB and I hence placed the backup on an external hard disk using a  **`ln -s`** symlink from `~/Library/Application Support/MobileSync/Backup` to my external HD `/Volumes/LaCie` where I put the iOS backup in the directory `MobileSync/Backup`
 * The first backup took 27 h to create 
 ### Update **the location** of that backup in the configuration parameters
 ```python

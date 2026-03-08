@@ -2,8 +2,14 @@
 __pycache__/
 *.pyc
 
+.DS_Store
+.ipynb_checkpoints/
+
 html/
 *.csv
 *.log
 
 ChatStorage.sqlite
+ChatStorage.sqlite-shm
+ChatStorage.sqlite-wal
+
